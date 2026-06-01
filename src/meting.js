@@ -87,9 +87,22 @@ class Meting {
         clearTimeout(timeoutId);
         
         // 存储响应信息
+        let setCookie = [];
+        if (typeof response.headers.getSetCookie === 'function') {
+          setCookie = response.headers.getSetCookie();
+        } else if (typeof response.headers.raw === 'function') {
+          setCookie = response.headers.raw()['set-cookie'] || [];
+        } else {
+          const cookieHeader = response.headers.get('set-cookie');
+          if (cookieHeader) {
+            setCookie = [cookieHeader];
+          }
+        }
+
         this.info = {
           statusCode: response.status,
-          headers: Object.fromEntries(response.headers.entries())
+          headers: Object.fromEntries(response.headers.entries()),
+          setCookie
         };
 
         // 获取响应数据
@@ -174,6 +187,151 @@ class Meting {
   // 获取封面图片
   async pic(id, size = 300) {
     return await this.provider.pic(id, size);
+  }
+
+  // ========== Login API methods ==========
+
+  // Create a QR login challenge for the current or requested provider.
+  async loginQr(option = {}) {
+    return await this._withLoginProvider(option, async () => {
+      const keyResult = JSON.parse(await this.loginQrKey(option) || 'null') || {};
+      const key = keyResult.key ||
+        keyResult.unikey ||
+        keyResult.qrsig ||
+        keyResult.ticket ||
+        (keyResult.data && keyResult.data.unikey);
+
+      if (!key) {
+        return JSON.stringify({
+          code: keyResult.code || -1,
+          server: this.server,
+          platform: this.server,
+          message: keyResult.message || this.status || 'Failed to create QR login key'
+        });
+      }
+
+      const result = JSON.parse(await this.loginQrCreate(key, {
+        ...option,
+        loginQrKey: keyResult
+      }) || 'null') || {};
+
+      result.server = result.server || this.server;
+      result.platform = result.platform || this.server;
+      result.key = result.key || key;
+      result.mid = result.mid || keyResult.mid;
+      result.dfid = result.dfid || keyResult.dfid;
+      result.state = result.state || this._encodeLoginState({
+        server: this.server,
+        key,
+        unikey: result.unikey || keyResult.unikey,
+        qrsig: result.qrsig || keyResult.qrsig,
+        ptqrtoken: result.ptqrtoken || keyResult.ptqrtoken,
+        qrcode: result.qrcode || keyResult.qrcode,
+        ticket: result.ticket || keyResult.ticket,
+        wxState: result.wxState || keyResult.wxState,
+        redirectUri: result.redirectUri || keyResult.redirectUri,
+        mid: result.mid || keyResult.mid,
+        dfid: result.dfid || keyResult.dfid
+      });
+
+      return JSON.stringify(result);
+    });
+  }
+
+  // Create a QR login key.
+  async loginQrKey(option = {}) {
+    if (typeof this.provider.fetchLoginQrKey === 'function') {
+      return await this.provider.fetchLoginQrKey(option, this);
+    }
+
+    const api = this.provider.loginQrKey(option);
+    return await this._exec(api);
+  }
+
+  // Convert a QR login key to a scannable login URL.
+  async loginQrCreate(key, option = {}) {
+    return await this.provider.loginQrCreate(key, option);
+  }
+
+  // Poll QR login status. A successful response includes a cookie field.
+  async loginQrCheck(key, option = {}) {
+    const state = option.state || this._decodeLoginState(key);
+
+    if (state) {
+      return await this._withLoginProvider({ server: state.server }, async () => {
+        const stateKey = state.key || state.unikey || state.qrsig || state.qrcode || state.ticket;
+        return await this.loginQrCheck(stateKey, {
+          ...option,
+          state: null,
+          loginState: state
+        });
+      });
+    }
+
+    if (typeof this.provider.fetchLoginQrCheck === 'function') {
+      return await this.provider.fetchLoginQrCheck(key, option, this);
+    }
+
+    const api = this.provider.loginQrCheck(key, option);
+    const raw = await this._exec(api);
+
+    if (typeof this.provider.formatLoginQrCheck === 'function') {
+      return this.provider.formatLoginQrCheck(raw, this.info, this);
+    }
+
+    return raw;
+  }
+
+  async _withLoginProvider(option, callback) {
+    const server = option.server || option.platform;
+    if (!server || server === this.server) {
+      return await callback();
+    }
+
+    const originalServer = this.server;
+    const originalProvider = this.provider;
+    const originalHeader = this.header;
+
+    this.site(server);
+    try {
+      return await callback();
+    } finally {
+      this.server = originalServer;
+      this.provider = originalProvider;
+      this.header = originalHeader;
+    }
+  }
+
+  _encodeLoginState(payload) {
+    const json = JSON.stringify(payload);
+    const encoded = Buffer.from(json, 'utf8')
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
+
+    return `meting-login.${encoded}`;
+  }
+
+  _decodeLoginState(value) {
+    if (!value || typeof value !== 'string' || !value.startsWith('meting-login.')) {
+      return null;
+    }
+
+    try {
+      let encoded = value.slice('meting-login.'.length)
+        .replace(/-/g, '+')
+        .replace(/_/g, '/');
+
+      while (encoded.length % 4) {
+        encoded += '=';
+      }
+
+      const decoded = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+      return decoded && decoded.server ? decoded : null;
+    } catch (error) {
+      return null;
+    }
   }
 
   // ========== 静态方法 ==========

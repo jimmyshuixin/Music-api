@@ -2,11 +2,13 @@
 <img src="https://user-images.githubusercontent.com/2666735/30165599-36623bea-93a6-11e7-8956-1ddf99ce0e6f.png" alt="Meting">
 </p>
 
-> :cake: A powerful music API framework for Node.js
+# Music-api
+
+> A Node.js music API framework upgraded from Meting, with unified music APIs and QR login support.
 
 ## Introduction
 
-Meting is a powerful music API framework designed to accelerate music-related development. This is the **Node.js** version of the original PHP Meting project, providing unified APIs for multiple music platforms.
+Music-api is a Node.js music API framework upgraded from [Meting](https://github.com/metowolf/Meting), designed to accelerate music-related development with unified APIs for multiple music platforms and QR login support.
 
 ### Features
 
@@ -24,16 +26,16 @@ Meting is a powerful music API framework designed to accelerate music-related de
 
 ## Installation
 
-Install via npm:
+Install dependencies:
 
 ```bash
-npm install @meting/core
+npm install
 ```
 
-Or via yarn:
+Build from source:
 
 ```bash
-yarn add @meting/core
+npm run build
 ```
 
 ## Quick Start
@@ -41,7 +43,7 @@ yarn add @meting/core
 ### Basic Usage
 
 ```javascript
-import Meting from '@meting/core';
+import Meting from 'music-api';
 
 // Initialize with a music platform
 const meting = new Meting('netease'); // 'netease', 'tencent', 'kugou', 'baidu', 'kuwo'
@@ -62,7 +64,7 @@ try {
 ### Comprehensive Example
 
 ```javascript
-import Meting from '@meting/core';
+import Meting from 'music-api';
 
 async function musicExample() {
   const meting = new Meting('netease');
@@ -125,6 +127,64 @@ const meting = new Meting(server);
 meting.site(server)    // Switch music platform
 meting.cookie(cookie)  // Set platform-specific cookies
 meting.format(enable)  // Enable/disable data formatting
+```
+
+#### QR Login
+
+QR login is currently implemented for NetEase Cloud Music (`netease`), QQ Music (`tencent`), KuGou Music (`kugou`), and Kuwo Music (`kuwo`):
+
+```javascript
+const meting = new Meting('tencent');
+
+// One-step helper for frontend QR rendering.
+const qr = JSON.parse(await meting.loginQr());
+// NetEase, KuGou, and Kuwo return qr.qrurl; QQ Music returns qr.qrimg.
+// All platforms return qr.state for automatic platform detection.
+
+// Frontend renders qr.qrurl or qr.qrimg, then polls with state:
+const status = JSON.parse(await meting.loginQrCheck(qr.state));
+
+if (status.code === 803) {
+  // Login succeeded. Store this on your server side if possible.
+  console.log(status.cookie);
+}
+```
+
+The lower-level methods are also available:
+
+```javascript
+await meting.loginQrKey();        // Get a QR login key
+await meting.loginQrCreate(key);  // Convert key to a QR URL or image
+await meting.loginQrCheck(key);   // Poll status and return cookie on success
+```
+
+Unified QR status codes commonly used by the frontend flow:
+
+| Code | Meaning |
+|------|---------|
+| `800` | QR code expired |
+| `801` | Waiting for scan |
+| `802` | Scanned, waiting for confirmation |
+| `803` | Login succeeded; response includes `cookie` |
+
+The `state` field is an opaque token that includes the target platform and QR key, so the check endpoint can identify the login platform automatically.
+
+Kuwo's web login uses WeChat OAuth QR login, so render `qr.qrurl` and scan it with WeChat.
+
+Run the bundled zero-dependency demo server:
+
+```bash
+npm run qr-login-server
+```
+
+Frontend endpoints:
+
+```text
+GET http://localhost:3000/login/qr?server=netease
+GET http://localhost:3000/login/qr?server=tencent
+GET http://localhost:3000/login/qr?server=kugou
+GET http://localhost:3000/login/qr?server=kuwo
+GET http://localhost:3000/login/qr/check?state=<state>
 ```
 
 #### Search & Discovery
@@ -264,6 +324,10 @@ await new Promise(resolve => setTimeout(resolve, 2000));
 - [injahow/meting-api](https://github.com/injahow/meting-api) - RESTful API wrapper
 - [yiyungent/Meting4Net](https://github.com/yiyungent/Meting4Net) - .NET version
 
+## Acknowledgements
+
+Music-api is built on top of the excellent [Meting](https://github.com/metowolf/Meting) project by [metowolf](https://github.com/metowolf). Thanks to the original project for the unified music API design and platform integration foundation.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
@@ -272,11 +336,11 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Author
+## Original Project
 
-**Meting Node.js** © [metowolf](https://github.com/metowolf), Released under the [MIT](./LICENSE) License.
+**Music-api** is released under the [MIT](./LICENSE) License.
 
-> Blog [@meto](https://i-meto.com) · GitHub [@metowolf](https://github.com/metowolf) · Twitter [@metowolf](https://twitter.com/metowolf)
+Original Meting links: Blog [@meto](https://i-meto.com), GitHub [@metowolf](https://github.com/metowolf), Twitter [@metowolf](https://twitter.com/metowolf)
 
 ---
 

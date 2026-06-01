@@ -127,6 +127,18 @@ export default class BaseProvider {
    * @param {Object} meting Meting 实例
    * @returns {string} 处理后的结果
    */
+  loginQrKey() {
+    throw new Error(`${this.name} provider does not support QR login`);
+  }
+
+  async loginQrCreate() {
+    throw new Error(`${this.name} provider does not support QR login`);
+  }
+
+  loginQrCheck() {
+    throw new Error(`${this.name} provider does not support QR login`);
+  }
+
   async executeRequest(api, meting) {
     // 如果有编码方法，先进行编码
     if (api.encode) {
@@ -141,7 +153,18 @@ export default class BaseProvider {
     }
 
     // 发送 HTTP 请求
-    await meting._curl(api.url, api.body);
+    const originalHeader = api.headers ? meting.header : null;
+    if (api.headers) {
+      meting.header = { ...meting.header, ...api.headers };
+    }
+
+    try {
+      await meting._curl(api.url, api.body);
+    } finally {
+      if (originalHeader) {
+        meting.header = originalHeader;
+      }
+    }
 
     // 如果不需要格式化，直接返回原始数据
     if (!meting.isFormat) {

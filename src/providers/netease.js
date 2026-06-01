@@ -4,6 +4,11 @@ import BaseProvider from './base.js';
 // eapi 相关常量
 const EAPI_KEY = 'e82ckenh8dichen8';
 const EAPI_IV = Buffer.from('0102030405060708');
+const WEAPI_PRESET_KEY = '0CoJUm6Qyw8W8jud';
+const WEAPI_IV = Buffer.from('0102030405060708');
+const WEAPI_PUBLIC_KEY = '010001';
+const WEAPI_MODULUS = '00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7';
+const WEAPI_CHARSET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
 /**
  * 网易云音乐平台提供者
@@ -29,6 +34,74 @@ export default class NeteaseProvider extends BaseProvider {
       'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
       'Connection': 'keep-alive',
       'Content-Type': 'application/x-www-form-urlencoded'
+    };
+  }
+
+  _getWebHeaders() {
+    const headers = {
+      'Referer': 'https://music.163.com/',
+      'Origin': 'https://music.163.com',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'Connection': 'keep-alive',
+      'Content-Type': 'application/x-www-form-urlencoded'
+    };
+
+    if (this.meting.header && this.meting.header.Cookie) {
+      headers.Cookie = this.meting.header.Cookie;
+    }
+
+    return headers;
+  }
+
+  loginQrKey() {
+    return {
+      method: 'POST',
+      url: `https://music.163.com/weapi/login/qrcode/unikey?csrf_token=&timestamp=${Date.now()}`,
+      body: {
+        type: 1
+      },
+      headers: this._getWebHeaders(),
+      encode: 'netease_weapi'
+    };
+  }
+
+  async loginQrCreate(key, option = {}) {
+    if (!key) {
+      throw new Error('QR login key is required');
+    }
+
+    const qrurl = `https://music.163.com/login?codekey=${encodeURIComponent(key)}&refer=scan`;
+    const result = {
+      code: 200,
+      unikey: key,
+      key,
+      qrurl
+    };
+
+    if (option.includeQrImage) {
+      result.qrimg = null;
+      result.message = 'QR image generation is not bundled. Render qrurl on the frontend.';
+    }
+
+    return JSON.stringify(result);
+  }
+
+  loginQrCheck(key) {
+    if (!key) {
+      throw new Error('QR login key is required');
+    }
+
+    return {
+      method: 'POST',
+      url: `https://music.163.com/weapi/login/qrcode/client/login?csrf_token=&timestamp=${Date.now()}`,
+      body: {
+        key,
+        type: 1
+      },
+      headers: this._getWebHeaders(),
+      encode: 'netease_weapi'
     };
   }
 
@@ -201,12 +274,63 @@ export default class NeteaseProvider extends BaseProvider {
     if (api.encode === 'netease_eapi') {
       return this.eapiEncrypt(api);
     }
+    if (api.encode === 'netease_weapi') {
+      return this.weapiEncrypt(api);
+    }
     return api;
   }
 
   /**
    * 网易云音乐 EAPI 加密
    */
+  formatLoginQrCheck(raw, info, meting) {
+    let result;
+    try {
+      result = JSON.parse(raw);
+    } catch (error) {
+      result = {
+        code: -1,
+        message: 'Invalid QR login response',
+        raw
+      };
+    }
+
+    result.server = result.server || 'netease';
+    result.platform = result.platform || 'netease';
+
+    const cookie = result.code === 803
+      ? (this._setCookieToCookieHeader(info && info.setCookie) || result.cookie || '')
+      : '';
+    if (cookie) {
+      result.cookie = cookie;
+      result.cookieHeader = this._mergeCookieHeaders(
+        this.meting.header && this.meting.header.Cookie,
+        cookie
+      );
+
+      if (result.code === 803 && meting && typeof meting.cookie === 'function') {
+        meting.cookie(result.cookieHeader);
+      }
+    }
+
+    return JSON.stringify(result);
+  }
+
+  async weapiEncrypt(api) {
+    const text = JSON.stringify(api.body);
+    const secretKey = this._getRandomString(16);
+
+    api.body = {
+      params: this._weapiAesEncrypt(
+        this._weapiAesEncrypt(text, WEAPI_PRESET_KEY),
+        secretKey
+      ),
+      encSecKey: this._weapiRsaEncrypt(secretKey)
+    };
+
+    return api;
+  }
+
   async eapiEncrypt(api) {
     const text = JSON.stringify(api.body);
     const url = api.url.replace(/https?:\/\/[^\/]+/, '');
@@ -279,6 +403,85 @@ export default class NeteaseProvider extends BaseProvider {
   /**
    * 生成随机 IP 地址
    */
+  _getRandomString(length) {
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += WEAPI_CHARSET[Math.floor(Math.random() * WEAPI_CHARSET.length)];
+    }
+    return result;
+  }
+
+  _weapiAesEncrypt(text, key) {
+    const cipher = crypto.createCipheriv(
+      'aes-128-cbc',
+      Buffer.from(key, 'utf8'),
+      WEAPI_IV
+    );
+    cipher.setAutoPadding(true);
+
+    let encrypted = cipher.update(text, 'utf8', 'base64');
+    encrypted += cipher.final('base64');
+    return encrypted;
+  }
+
+  _weapiRsaEncrypt(text) {
+    const reversed = text.split('').reverse().join('');
+    const hex = Buffer.from(reversed, 'utf8').toString('hex');
+    const value = BigInt('0x' + hex);
+    const publicKey = BigInt('0x' + WEAPI_PUBLIC_KEY);
+    const modulus = BigInt('0x' + WEAPI_MODULUS);
+
+    return this._powMod(value, publicKey, modulus)
+      .toString(16)
+      .padStart(256, '0');
+  }
+
+  _setCookieToCookieHeader(setCookie) {
+    if (!setCookie) {
+      return '';
+    }
+
+    const values = Array.isArray(setCookie) ? setCookie : [setCookie];
+    return values
+      .flatMap(value => this._splitSetCookieHeader(value))
+      .map(cookie => cookie.split(';')[0].trim())
+      .filter(Boolean)
+      .join('; ');
+  }
+
+  _splitSetCookieHeader(header) {
+    if (!header) {
+      return [];
+    }
+
+    return String(header).split(/,(?=\s*[^;,=\s]+=)/);
+  }
+
+  _mergeCookieHeaders(baseCookie = '', nextCookie = '') {
+    const cookies = new Map();
+
+    const addCookie = cookieHeader => {
+      String(cookieHeader)
+        .split(';')
+        .map(part => part.trim())
+        .filter(Boolean)
+        .forEach(part => {
+          const index = part.indexOf('=');
+          if (index <= 0) {
+            return;
+          }
+          cookies.set(part.slice(0, index), part.slice(index + 1));
+        });
+    };
+
+    addCookie(baseCookie);
+    addCookie(nextCookie);
+
+    return Array.from(cookies.entries())
+      .map(([key, value]) => `${key}=${value}`)
+      .join('; ');
+  }
+
   _generateRandomIP() {
     const min = 1884815360; // 112.74.200.0
     const max = 1884890111; // 112.74.243.255

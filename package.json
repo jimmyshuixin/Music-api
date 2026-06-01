@@ -1,7 +1,7 @@
 {
-  "name": "@meting/core",
+  "name": "music-api",
   "version": "1.6.1",
-  "description": "A powerful music API framework to accelerate development - Node.js port. Support Netease, Tencent, Kugou, Baidu, Kuwo music platforms.",
+  "description": "A Node.js music API framework upgraded from Meting, with unified music APIs and QR login support.",
   "main": "./lib/meting.js",
   "module": "./lib/meting.esm.js",
   "type": "module",
@@ -19,7 +19,8 @@
     "prepublishOnly": "npm run build",
     "test": "npm run build && node test/test.js",
     "example": "npm run build && node test/example.js",
-    "start": "npm run build && node test/example.js"
+    "start": "npm run build && node test/example.js",
+    "qr-login-server": "node test/qr-login-server.js"
   },
   "keywords": [
     "music",
@@ -50,13 +51,13 @@
     }
   ],
   "license": "MIT",
-  "homepage": "https://github.com/metowolf/Meting",
+  "homepage": "https://github.com/jimmyshuixin/Music-api",
   "repository": {
     "type": "git",
-    "url": "https://github.com/metowolf/Meting.git"
+    "url": "https://github.com/jimmyshuixin/Music-api.git"
   },
   "bugs": {
-    "url": "https://github.com/metowolf/Meting/issues"
+    "url": "https://github.com/jimmyshuixin/Music-api/issues"
   },
   "devDependencies": {
     "@rollup/plugin-babel": "^6.0.4",

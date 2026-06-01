@@ -1,5 +1,12 @@
 import BaseProvider from './base.js';
 
+const QQ_LOGIN_APPID = '716027609';
+const QQ_LOGIN_DAID = '383';
+const QQ_LOGIN_3RD_AID = '100497308';
+const QQ_LOGIN_U1 = 'https://graph.qq.com/oauth2.0/login_jump';
+const QQ_LOGIN_JS_VER = '23111510';
+const QQ_LOGIN_PT_JS_VER = 'v1.48.1';
+
 /**
  * 腾讯音乐平台提供者
  */
@@ -22,6 +29,164 @@ export default class TencentProvider extends BaseProvider {
       'Connection': 'keep-alive',
       'Content-Type': 'application/x-www-form-urlencoded'
     };
+  }
+
+  async fetchLoginQrKey() {
+    const url = 'https://ssl.ptlogin2.qq.com/ptqrshow?' + new URLSearchParams({
+      appid: QQ_LOGIN_APPID,
+      e: '2',
+      l: 'M',
+      s: '3',
+      d: '72',
+      v: '4',
+      t: String(Math.random()),
+      daid: QQ_LOGIN_DAID,
+      pt_3rd_aid: QQ_LOGIN_3RD_AID,
+      u1: QQ_LOGIN_U1
+    }).toString();
+
+    const response = await fetch(url, {
+      headers: {
+        'Referer': 'https://y.qq.com/',
+        'User-Agent': this.getHeaders()['User-Agent'],
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+      }
+    });
+
+    const setCookie = this._getSetCookie(response);
+    const qrsig = this._getCookieValue(setCookie, 'qrsig');
+    const image = Buffer.from(await response.arrayBuffer()).toString('base64');
+
+    if (!qrsig) {
+      return JSON.stringify({
+        code: -1,
+        server: 'tencent',
+        platform: 'tencent',
+        message: 'Failed to create QQ Music QR login key'
+      });
+    }
+
+    return JSON.stringify({
+      code: 200,
+      server: 'tencent',
+      platform: 'tencent',
+      type: 'qq',
+      scanApp: 'QQ',
+      key: qrsig,
+      qrsig,
+      ptqrtoken: this._hash33(qrsig),
+      qrimg: `data:image/png;base64,${image}`
+    });
+  }
+
+  async loginQrCreate(key, option = {}) {
+    const keyResult = option.loginQrKey || {};
+    const qrsig = keyResult.qrsig || key;
+
+    return JSON.stringify({
+      code: 200,
+      server: 'tencent',
+      platform: 'tencent',
+      type: 'qq',
+      scanApp: 'QQ',
+      key: qrsig,
+      qrsig,
+      ptqrtoken: keyResult.ptqrtoken || this._hash33(qrsig),
+      qrimg: keyResult.qrimg || '',
+      qrurl: ''
+    });
+  }
+
+  async fetchLoginQrCheck(key, option = {}) {
+    const state = option.loginState || {};
+    const qrsig = state.qrsig || key;
+    const ptqrtoken = state.ptqrtoken || this._hash33(qrsig);
+
+    if (!qrsig) {
+      return JSON.stringify({
+        code: 400,
+        server: 'tencent',
+        platform: 'tencent',
+        message: 'Missing qrsig'
+      });
+    }
+
+    const url = 'https://ssl.ptlogin2.qq.com/ptqrlogin?' + new URLSearchParams({
+      u1: QQ_LOGIN_U1,
+      ptqrtoken: String(ptqrtoken),
+      ptredirect: '0',
+      h: '1',
+      t: '1',
+      g: '1',
+      from_ui: '1',
+      ptlang: '2052',
+      action: `0-0-${Date.now()}`,
+      js_ver: QQ_LOGIN_JS_VER,
+      js_type: '1',
+      login_sig: '',
+      pt_uistyle: '40',
+      aid: QQ_LOGIN_APPID,
+      daid: QQ_LOGIN_DAID,
+      pt_3rd_aid: QQ_LOGIN_3RD_AID,
+      pt_js_version: QQ_LOGIN_PT_JS_VER
+    }).toString();
+
+    const response = await fetch(url, {
+      redirect: 'manual',
+      headers: {
+        'Cookie': `qrsig=${qrsig}`,
+        'Referer': 'https://xui.ptlogin2.qq.com/',
+        'User-Agent': this.getHeaders()['User-Agent'],
+        'Accept': '*/*'
+      }
+    });
+
+    const raw = await response.text();
+    const args = this._parsePtuiCallback(raw);
+    const qqCode = args[0] || '';
+    const message = args[4] || this._getLoginMessage(qqCode);
+
+    const result = {
+      code: this._normalizeLoginCode(qqCode),
+      qqCode,
+      server: 'tencent',
+      platform: 'tencent',
+      type: 'qq',
+      message,
+      raw
+    };
+
+    if (result.code !== 803) {
+      return JSON.stringify(result);
+    }
+
+    const redirectUrl = args[2] || '';
+    let cookies = this._cookiePairs(this._getSetCookie(response));
+
+    if (redirectUrl) {
+      const checkSigResponse = await fetch(redirectUrl, {
+        redirect: 'manual',
+        headers: {
+          'Cookie': this._mergeCookieHeaders(`qrsig=${qrsig}`, cookies.join('; ')),
+          'Referer': 'https://ssl.ptlogin2.qq.com/',
+          'User-Agent': this.getHeaders()['User-Agent'],
+          'Accept': '*/*'
+        }
+      });
+
+      cookies = cookies.concat(this._cookiePairs(this._getSetCookie(checkSigResponse)));
+      const musicCookies = await this._fetchMusicCookies(cookies);
+      cookies = cookies.concat(musicCookies);
+    }
+
+    const cookie = this._dedupeCookiePairs(cookies).join('; ');
+    if (cookie) {
+      result.cookie = cookie;
+      result.cookieHeader = this._mergeCookieHeaders(this.meting.header.Cookie, cookie);
+      this.meting.cookie(result.cookieHeader);
+    }
+
+    return JSON.stringify(result);
   }
 
   /**
@@ -324,5 +489,132 @@ export default class TencentProvider extends BaseProvider {
     };
 
     return JSON.stringify(lyricData);
+  }
+
+  async _fetchMusicCookies(cookies) {
+    try {
+      const response = await fetch('https://y.qq.com/portal/profile.html', {
+        redirect: 'manual',
+        headers: {
+          'Cookie': this._dedupeCookiePairs(cookies).join('; '),
+          'Referer': 'https://y.qq.com/',
+          'User-Agent': this.getHeaders()['User-Agent'],
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+      });
+
+      return this._cookiePairs(this._getSetCookie(response));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  _hash33(value) {
+    let hash = 0;
+    for (let i = 0; i < value.length; i++) {
+      hash += (hash << 5) + value.charCodeAt(i);
+      hash &= 0x7fffffff;
+    }
+    return hash & 0x7fffffff;
+  }
+
+  _parsePtuiCallback(raw) {
+    const match = String(raw).match(/ptuiCB\((.*)\)/);
+    if (!match) {
+      return [];
+    }
+
+    const args = [];
+    const pattern = /'([^']*)'/g;
+    let part;
+    while ((part = pattern.exec(match[1])) !== null) {
+      args.push(part[1]);
+    }
+    return args;
+  }
+
+  _normalizeLoginCode(qqCode) {
+    const codeMap = {
+      '0': 803,
+      '65': 800,
+      '66': 801,
+      '67': 802
+    };
+
+    return codeMap[qqCode] || Number(qqCode) || -1;
+  }
+
+  _getLoginMessage(qqCode) {
+    const messageMap = {
+      '0': '登录成功',
+      '65': '二维码已失效',
+      '66': '等待扫码',
+      '67': '已扫码，等待确认'
+    };
+
+    return messageMap[qqCode] || 'QQ Music QR login status unknown';
+  }
+
+  _getSetCookie(response) {
+    if (!response || !response.headers) {
+      return [];
+    }
+
+    if (typeof response.headers.getSetCookie === 'function') {
+      return response.headers.getSetCookie();
+    }
+
+    if (typeof response.headers.raw === 'function') {
+      return response.headers.raw()['set-cookie'] || [];
+    }
+
+    const cookie = response.headers.get('set-cookie');
+    return cookie ? [cookie] : [];
+  }
+
+  _getCookieValue(setCookie, name) {
+    const pair = this._cookiePairs(setCookie)
+      .find(cookie => cookie.startsWith(`${name}=`));
+
+    return pair ? pair.slice(name.length + 1) : '';
+  }
+
+  _cookiePairs(setCookie) {
+    const values = Array.isArray(setCookie) ? setCookie : [setCookie];
+
+    return values
+      .flatMap(value => this._splitSetCookieHeader(value))
+      .map(cookie => cookie.split(';')[0].trim())
+      .filter(cookie => cookie && cookie.includes('=') && !cookie.endsWith('='));
+  }
+
+  _splitSetCookieHeader(header) {
+    if (!header) {
+      return [];
+    }
+
+    return String(header).split(/,(?=\s*[^;,=\s]+=)/);
+  }
+
+  _dedupeCookiePairs(cookies) {
+    const map = new Map();
+    cookies
+      .filter(Boolean)
+      .forEach(cookie => {
+        const index = cookie.indexOf('=');
+        if (index <= 0) {
+          return;
+        }
+        map.set(cookie.slice(0, index), cookie.slice(index + 1));
+      });
+
+    return Array.from(map.entries()).map(([key, value]) => `${key}=${value}`);
+  }
+
+  _mergeCookieHeaders(baseCookie = '', nextCookie = '') {
+    return this._dedupeCookiePairs([
+      ...String(baseCookie).split(';').map(item => item.trim()),
+      ...String(nextCookie).split(';').map(item => item.trim())
+    ]).join('; ');
   }
 }
