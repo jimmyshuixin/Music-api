@@ -171,6 +171,11 @@ class Meting {
     return await this._exec(api);
   }
 
+  async userPlaylists(userId = null, option = {}) {
+    const api = this.provider.userPlaylists(userId, option);
+    return await this._exec(api);
+  }
+
   // 获取音频播放链接
   async url(id, br = 320) {
     this.temp.br = br;

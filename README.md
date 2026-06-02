@@ -211,6 +211,7 @@ await meting.song(id)           // Get song details
 await meting.album(id)          // Get album information
 await meting.artist(id, limit)  // Get artist's songs
 await meting.playlist(id)       // Get playlist content
+await meting.userPlaylists(uid) // Get Tencent user playlists; omit uid to use login cookie uin
 ```
 
 #### Media Resources
