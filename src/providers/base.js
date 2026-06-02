@@ -63,6 +63,10 @@ export default class BaseProvider {
     throw new Error(`${this.name} provider must implement playlist method`);
   }
 
+  userPlaylists() {
+    throw new Error(`${this.name} provider does not support user playlists`);
+  }
+
   /**
    * 获取音频播放链接
    * @param {string} id 歌曲ID
@@ -231,7 +235,14 @@ export default class BaseProvider {
       data = this.pickupData(data, rule);
     }
 
+    if (data === null || data === undefined) {
+      return JSON.stringify([]);
+    }
+
     if (!Array.isArray(data) && typeof data === 'object' && data !== null) {
+      if (Object.keys(data).length === 0) {
+        return JSON.stringify([]);
+      }
       data = [data];
     }
 
@@ -241,7 +252,9 @@ export default class BaseProvider {
 
     // 使用当前 provider 的格式化方法
     if (typeof this.format === 'function') {
-      const result = data.map(item => this.format(item));
+      const result = data
+        .map(item => this.format(item))
+        .filter(item => item && typeof item === 'object');
       return JSON.stringify(result);
     }
 

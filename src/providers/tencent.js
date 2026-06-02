@@ -164,17 +164,13 @@ export default class TencentProvider extends BaseProvider {
     let cookies = this._cookiePairs(this._getSetCookie(response));
 
     if (redirectUrl) {
-      const checkSigResponse = await fetch(redirectUrl, {
-        redirect: 'manual',
-        headers: {
-          'Cookie': this._mergeCookieHeaders(`qrsig=${qrsig}`, cookies.join('; ')),
-          'Referer': 'https://ssl.ptlogin2.qq.com/',
-          'User-Agent': this.getHeaders()['User-Agent'],
-          'Accept': '*/*'
-        }
-      });
+      const redirectCookies = await this._followCookieRedirects(
+        redirectUrl,
+        [`qrsig=${qrsig}`, ...cookies],
+        'https://ssl.ptlogin2.qq.com/'
+      );
 
-      cookies = cookies.concat(this._cookiePairs(this._getSetCookie(checkSigResponse)));
+      cookies = cookies.concat(redirectCookies);
       const musicCookies = await this._fetchMusicCookies(cookies);
       cookies = cookies.concat(musicCookies);
     }
@@ -279,6 +275,34 @@ export default class TencentProvider extends BaseProvider {
     };
   }
 
+  userPlaylists(userId = null, option = {}) {
+    const uin = userId || option.uin || this._getLoginUin();
+    const gtk = this._getGtk() || 5381;
+
+    return {
+      method: 'GET',
+      url: 'https://c.y.qq.com/rsc/fcgi-bin/fcg_user_created_diss',
+      body: {
+        hostUin: 0,
+        hostuin: uin,
+        sin: option.offset || 0,
+        size: option.limit || 200,
+        g_tk: gtk,
+        loginUin: uin,
+        format: 'json',
+        inCharset: 'utf8',
+        outCharset: 'utf-8',
+        notice: 0,
+        platform: 'yqq.json',
+        needNewCode: 0
+      },
+      headers: {
+        'Referer': 'https://y.qq.com/portal/profile.html'
+      },
+      decode: 'tencent_user_playlists'
+    };
+  }
+
   /**
    * 获取音频播放链接
    */
@@ -325,22 +349,35 @@ export default class TencentProvider extends BaseProvider {
     if (data.musicData) {
       data = data.musicData;
     }
-    
+
+    const album = data.album || {};
+    const singers = Array.isArray(data.singer)
+      ? data.singer
+      : (Array.isArray(data.singers) ? data.singers : []);
+    const id = data.mid || data.songmid || (data.file && data.file.media_mid) || '';
+
+    if (!id) {
+      return null;
+    }
+
     const result = {
-      id: data.mid,
-      name: data.name,
+      id,
+      name: data.name || data.title || data.songname || '',
       artist: [],
-      album: data.album.title.trim(),
-      pic_id: data.album.mid,
-      url_id: data.mid,
-      lyric_id: data.mid,
+      album: String(album.title || album.name || data.albumname || '').trim(),
+      pic_id: album.mid || album.pmid || data.albummid || '',
+      url_id: id,
+      lyric_id: id,
       source: 'tencent'
     };
-    
-    data.singer.forEach(singer => {
-      result.artist.push(singer.name);
+
+    singers.forEach(singer => {
+      const name = singer.name || singer.title || singer.singername;
+      if (name) {
+        result.artist.push(name);
+      }
     });
-    
+
     return result;
   }
 
@@ -352,6 +389,8 @@ export default class TencentProvider extends BaseProvider {
       return this.urlDecode(data);
     } else if (decodeType === 'tencent_lyric') {
       return this.lyricDecode(data);
+    } else if (decodeType === 'tencent_user_playlists') {
+      return this.userPlaylistsDecode(data);
     }
     return data;
   }
@@ -371,7 +410,7 @@ export default class TencentProvider extends BaseProvider {
       });
     }
 
-    const guid = Math.floor(Math.random() * 10000000000);
+    const guid = this._getGuid();
     
     const qualityMap = [
       ['size_flac', 999, 'F000', 'flac'],
@@ -384,7 +423,8 @@ export default class TencentProvider extends BaseProvider {
     ];
     
     const uin = this._getLoginUin();
-    const gtk = this._getGtk();
+    const gtk = this._getGtk() || 5381;
+    const musicKey = this._getMusicKey();
     const candidates = [];
 
     qualityMap.forEach(([sizeKey, br, prefix, ext]) => {
@@ -441,13 +481,27 @@ export default class TencentProvider extends BaseProvider {
       }
     };
 
-    if (gtk) {
-      payload.comm.g_tk = gtk;
+    payload.comm.g_tk = gtk;
+    if (musicKey) {
+      payload.comm.authst = musicKey;
     }
+
+    const query = new URLSearchParams({
+      '-': `getplaysongvkey${Date.now()}`,
+      g_tk: String(gtk),
+      loginUin: String(uin),
+      hostUin: '0',
+      format: 'json',
+      inCharset: 'utf8',
+      outCharset: 'utf-8',
+      notice: '0',
+      platform: 'yqq.json',
+      needNewCode: '0'
+    });
     
     const api = {
       method: 'POST',
-      url: 'https://u.y.qq.com/cgi-bin/musicu.fcg',
+      url: `https://u.y.qq.com/cgi-bin/musicu.fcg?${query.toString()}`,
       body: JSON.stringify(payload),
       headers: {
         'Content-Type': 'application/json;charset=UTF-8',
@@ -529,8 +583,7 @@ export default class TencentProvider extends BaseProvider {
    * 腾讯音乐歌词解码
    */
   lyricDecode(result) {
-    const jsonStr = result.substring(18, result.length - 1);
-    const data = JSON.parse(jsonStr);
+    const data = this._parseJsonPayload(result);
 
     const lyricData = {
       lyric: data.lyric ? this.decodeHtmlEntities(Buffer.from(data.lyric, 'base64').toString()) : '',
@@ -540,22 +593,78 @@ export default class TencentProvider extends BaseProvider {
     return JSON.stringify(lyricData);
   }
 
+  userPlaylistsDecode(result) {
+    const payload = this._parseJsonPayload(result);
+    const data = payload && payload.data ? payload.data : {};
+    const list = Array.isArray(data.disslist) ? data.disslist : [];
+
+    return JSON.stringify({
+      code: payload && typeof payload.code === 'number' ? payload.code : 0,
+      server: 'tencent',
+      platform: 'tencent',
+      user: {
+        uin: this._getLoginUin(),
+        hostuin: data.hostuin ? String(data.hostuin) : '',
+        encrypt_uin: data.encrypt_uin || '',
+        name: data.hostname || ''
+      },
+      playlists: list.map(item => ({
+        id: String(item.tid || item.disstid || item.dissid || item.dirid || ''),
+        dirid: item.dirid || null,
+        dissid: item.dissid || item.tid || null,
+        name: item.diss_name || item.dissname || item.dirname || '',
+        pic: item.diss_cover || item.diss_pic || item.logo || '',
+        song_count: item.song_cnt || item.songnum || item.cur_song_num || 0,
+        listen_count: item.listen_num || item.visitnum || 0,
+        public: item.dir_show !== 0,
+        source: 'tencent'
+      })).filter(item => item.id)
+    });
+  }
+
   async _fetchMusicCookies(cookies) {
     try {
-      const response = await fetch('https://y.qq.com/portal/profile.html', {
+      return await this._followCookieRedirects(
+        'https://y.qq.com/portal/profile.html',
+        cookies,
+        'https://y.qq.com/'
+      );
+    } catch (error) {
+      return [];
+    }
+  }
+
+  async _followCookieRedirects(url, cookies, referer = 'https://y.qq.com/', maxRedirects = 5) {
+    const collected = [];
+    let currentUrl = url;
+    let currentReferer = referer;
+    let cookieJar = this._dedupeCookiePairs(cookies);
+
+    for (let i = 0; i <= maxRedirects && currentUrl; i++) {
+      const response = await fetch(currentUrl, {
         redirect: 'manual',
         headers: {
-          'Cookie': this._dedupeCookiePairs(cookies).join('; '),
-          'Referer': 'https://y.qq.com/',
+          'Cookie': cookieJar.join('; '),
+          'Referer': currentReferer,
           'User-Agent': this.getHeaders()['User-Agent'],
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
       });
 
-      return this._cookiePairs(this._getSetCookie(response));
-    } catch (error) {
-      return [];
+      const nextCookies = this._cookiePairs(this._getSetCookie(response));
+      collected.push(...nextCookies);
+      cookieJar = this._dedupeCookiePairs([...cookieJar, ...nextCookies]);
+
+      const location = response.headers.get('location');
+      if (!location || response.status < 300 || response.status >= 400) {
+        break;
+      }
+
+      currentReferer = currentUrl;
+      currentUrl = new URL(location, currentUrl).toString();
     }
+
+    return this._dedupeCookiePairs(collected);
   }
 
   _getLoginUin() {
@@ -580,6 +689,35 @@ export default class TencentProvider extends BaseProvider {
       hash += (hash << 5) + skey.charCodeAt(i);
     }
     return hash & 0x7fffffff;
+  }
+
+  _getMusicKey() {
+    return this._getCookieHeaderValue('qqmusic_key') ||
+      this._getCookieHeaderValue('qm_keyst') ||
+      this._getCookieHeaderValue('musickey') ||
+      '';
+  }
+
+  _getGuid() {
+    const guid = this._getCookieHeaderValue('pgv_pvid') ||
+      this._getCookieHeaderValue('pgv_pvi') ||
+      String(Math.floor(Math.random() * 10000000000));
+
+    return String(guid).replace(/\D/g, '') || String(Math.floor(Math.random() * 10000000000));
+  }
+
+  _parseJsonPayload(result) {
+    const text = String(result || '').trim();
+
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      const match = text.match(/^[^(]*\(([\s\S]*)\)\s*;?$/);
+      if (!match) {
+        throw error;
+      }
+      return JSON.parse(match[1]);
+    }
   }
 
   _getCookieHeaderValue(name) {
