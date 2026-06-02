@@ -361,6 +361,16 @@ export default class TencentProvider extends BaseProvider {
    */
   async urlDecode(result) {
     const data = JSON.parse(result);
+    const song = data.data && data.data[0];
+    if (!song || !song.file) {
+      return JSON.stringify({
+        url: '',
+        size: 0,
+        br: -1,
+        message: 'QQ Music did not return song metadata'
+      });
+    }
+
     const guid = Math.floor(Math.random() * 10000000000);
     
     const qualityMap = [
@@ -373,60 +383,95 @@ export default class TencentProvider extends BaseProvider {
       ['size_24aac', 24, 'C100', 'm4a']
     ];
     
-    let uin = '0';
-    const uinMatch = this.meting.header.Cookie && this.meting.header.Cookie.match(/uin=(\d+)/);
-    if (uinMatch) {
-      uin = uinMatch[1];
+    const uin = this._getLoginUin();
+    const gtk = this._getGtk();
+    const candidates = [];
+
+    qualityMap.forEach(([sizeKey, br, prefix, ext]) => {
+      if (!song.file[sizeKey] || br > this.meting.temp.br) {
+        return;
+      }
+
+      const filenames = new Set([
+        `${prefix}${song.file.media_mid || song.mid}.${ext}`,
+        `${prefix}${song.mid}${song.mid}.${ext}`,
+        `${prefix}${song.mid}.${ext}`
+      ]);
+
+      filenames.forEach(filename => {
+        candidates.push({
+          filename,
+          songmid: song.mid,
+          songtype: song.type || 0,
+          size: song.file[sizeKey],
+          br
+        });
+      });
+    });
+
+    if (!candidates.length) {
+      return JSON.stringify({
+        url: '',
+        size: 0,
+        br: -1,
+        message: 'QQ Music has no matching file for the requested bitrate'
+      });
     }
-    
+
     const payload = {
-      req_0: {
+      req_1: {
         module: 'vkey.GetVkeyServer',
         method: 'CgiGetVkey',
         param: {
           guid: String(guid),
-          songmid: [],
-          filename: [],
-          songtype: [],
+          songmid: candidates.map(candidate => candidate.songmid),
+          filename: candidates.map(candidate => candidate.filename),
+          songtype: candidates.map(candidate => candidate.songtype),
           uin: uin,
           loginflag: 1,
           platform: '20'
         }
+      },
+      loginUin: uin,
+      comm: {
+        uin,
+        format: 'json',
+        ct: 24,
+        cv: 0
       }
     };
-    
-    qualityMap.forEach(([sizeKey, br, prefix, ext]) => {
-      payload.req_0.param.songmid.push(data.data[0].mid);
-      payload.req_0.param.filename.push(`${prefix}${data.data[0].file.media_mid}.${ext}`);
-      payload.req_0.param.songtype.push(data.data[0].type);
-    });
+
+    if (gtk) {
+      payload.comm.g_tk = gtk;
+    }
     
     const api = {
-      method: 'GET',
+      method: 'POST',
       url: 'https://u.y.qq.com/cgi-bin/musicu.fcg',
-      body: {
-        format: 'json',
-        platform: 'yqq.json',
-        needNewCode: 0,
-        data: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      headers: {
+        'Content-Type': 'application/json;charset=UTF-8',
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://y.qq.com',
+        'Referer': 'https://y.qq.com/'
       }
     };
     
     const response = JSON.parse(await this.meting._exec(api));
-    const vkeys = response.req_0.data.midurlinfo;
+    const vkeys = response.req_1 && response.req_1.data ? response.req_1.data.midurlinfo || [] : [];
+    const sip = response.req_1 && response.req_1.data && response.req_1.data.sip ? response.req_1.data.sip[0] : '';
     
-    let url;
-    for (let i = 0; i < qualityMap.length; i++) {
-      const [sizeKey, br, prefix, ext] = qualityMap[i];
-      if (data.data[0].file[sizeKey] && br <= this.meting.temp.br) {
-        if (vkeys[i].vkey) {
-          url = {
-            url: response.req_0.data.sip[0] + vkeys[i].purl,
-            size: data.data[0].file[sizeKey],
-            br: br
-          };
-          break;
-        }
+    let url = null;
+    for (let i = 0; i < candidates.length; i++) {
+      const vkey = vkeys[i] || {};
+      if (vkey.purl) {
+        const purl = vkey.purl || '';
+        url = {
+          url: /^https?:\/\//i.test(purl) ? purl : `${sip}${purl}`,
+          size: candidates[i].size,
+          br: candidates[i].br
+        };
+        break;
       }
     }
     
@@ -434,7 +479,11 @@ export default class TencentProvider extends BaseProvider {
       url = {
         url: '',
         size: 0,
-        br: -1
+        br: -1,
+        code: response.req_1 ? response.req_1.code : response.code,
+        message: response.req_1 && response.req_1.msg
+          ? response.req_1.msg
+          : 'QQ Music did not return a playable URL for this track'
       };
     }
     
@@ -507,6 +556,40 @@ export default class TencentProvider extends BaseProvider {
     } catch (error) {
       return [];
     }
+  }
+
+  _getLoginUin() {
+    const cookieUin =
+      this._getCookieHeaderValue('uin') ||
+      this._getCookieHeaderValue('p_uin') ||
+      this._getCookieHeaderValue('pt2gguin') ||
+      '';
+
+    const normalized = String(cookieUin).replace(/^o/, '').replace(/\D/g, '');
+    return normalized || '0';
+  }
+
+  _getGtk() {
+    const skey = this._getCookieHeaderValue('p_skey') || this._getCookieHeaderValue('skey') || '';
+    if (!skey) {
+      return 0;
+    }
+
+    let hash = 5381;
+    for (let i = 0; i < skey.length; i++) {
+      hash += (hash << 5) + skey.charCodeAt(i);
+    }
+    return hash & 0x7fffffff;
+  }
+
+  _getCookieHeaderValue(name) {
+    const cookie = this.meting.header.Cookie || '';
+    const found = String(cookie)
+      .split(';')
+      .map(item => item.trim())
+      .find(item => item.startsWith(`${name}=`));
+
+    return found ? found.slice(name.length + 1) : '';
   }
 
   _hash33(value) {
