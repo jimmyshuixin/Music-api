@@ -417,7 +417,7 @@ export default class TencentProvider extends BaseProvider {
     }
 
     const guid = this._getGuid();
-    
+
     const qualityMap = [
       ['size_flac', 999, 'F000', 'flac'],
       ['size_320mp3', 320, 'M800', 'mp3'],
@@ -432,26 +432,26 @@ export default class TencentProvider extends BaseProvider {
     const gtk = this._getGtk() || 5381;
     const musicKey = this._getMusicKey();
     const candidates = [];
+    const mediaMid = song.file.media_mid || song.mid;
 
     qualityMap.forEach(([sizeKey, br, prefix, ext]) => {
       if (!song.file[sizeKey] || br > this.meting.temp.br) {
         return;
       }
 
-      const filenames = new Set([
-        `${prefix}${song.file.media_mid || song.mid}.${ext}`,
+      const filename = `${prefix}${song.mid}${mediaMid}.${ext}`;
+      const fallbackFilenames = Array.from(new Set([
+        `${prefix}${mediaMid}.${ext}`,
         `${prefix}${song.mid}${song.mid}.${ext}`,
         `${prefix}${song.mid}.${ext}`
-      ]);
+      ])).filter(item => item !== filename);
 
-      filenames.forEach(filename => {
-        candidates.push({
-          filename,
-          songmid: song.mid,
-          songtype: song.type || 0,
-          size: song.file[sizeKey],
-          br
-        });
+      candidates.push({
+        filename,
+        fallbackFilenames,
+        songmid: song.mid,
+        size: song.file[sizeKey],
+        br
       });
     });
 
@@ -464,50 +464,86 @@ export default class TencentProvider extends BaseProvider {
       });
     }
 
+    const requestOptions = { guid, gtk, uin, musicKey };
+    const fallbackCandidates = candidates.flatMap(candidate =>
+      candidate.fallbackFilenames.map(filename => ({ ...candidate, filename }))
+    );
+    const attemptGroups = [candidates, candidates];
+    if (fallbackCandidates.length) {
+      attemptGroups.push(fallbackCandidates);
+    }
+
+    let url = null;
+    let lastResponse = null;
+
+    for (const group of attemptGroups) {
+      const result = await this._requestVkeys(group, requestOptions);
+      lastResponse = result.response;
+
+      for (let i = 0; i < group.length; i++) {
+        const purl = result.vkeys[i] && result.vkeys[i].purl;
+        if (purl) {
+          url = {
+            url: /^https?:\/\//i.test(purl) ? purl : `${result.sip}${purl}`,
+            size: group[i].size,
+            br: group[i].br
+          };
+          break;
+        }
+      }
+
+      if (url) {
+        break;
+      }
+    }
+
+    if (!url) {
+      const requestResult = lastResponse && (lastResponse.req_0 || lastResponse.req_1);
+      url = {
+        url: '',
+        size: 0,
+        br: -1,
+        code: requestResult ? requestResult.code : (lastResponse && lastResponse.code),
+        message: requestResult && requestResult.msg
+          ? requestResult.msg
+          : 'QQ Music did not return a playable URL for this track'
+      };
+    }
+
+    return JSON.stringify(url);
+  }
+
+  async _requestVkeys(candidates, option) {
     const payload = {
-      req_1: {
+      req_0: {
         module: 'vkey.GetVkeyServer',
         method: 'CgiGetVkey',
         param: {
-          guid: String(guid),
-          songmid: candidates.map(candidate => candidate.songmid),
           filename: candidates.map(candidate => candidate.filename),
-          songtype: candidates.map(candidate => candidate.songtype),
-          uin: uin,
+          guid: String(option.guid),
+          songmid: candidates.map(candidate => candidate.songmid),
+          songtype: candidates.map(() => 0),
+          uin: option.uin,
           loginflag: 1,
           platform: '20'
         }
       },
-      loginUin: uin,
       comm: {
-        uin,
+        uin: option.uin,
         format: 'json',
-        ct: 24,
-        cv: 0
+        ct: 19,
+        cv: 0,
+        g_tk: option.gtk
       }
     };
 
-    payload.comm.g_tk = gtk;
-    if (musicKey) {
-      payload.comm.authst = musicKey;
+    if (option.musicKey) {
+      payload.comm.authst = option.musicKey;
     }
 
-    const query = new URLSearchParams({
-      '-': `getplaysongvkey${Date.now()}`,
-      g_tk: String(gtk),
-      loginUin: String(uin),
-      hostUin: '0',
-      format: 'json',
-      inCharset: 'utf8',
-      outCharset: 'utf-8',
-      notice: '0',
-      platform: 'yqq.json',
-      needNewCode: '0'
-    });
-    
     const api = {
       method: 'POST',
-      url: `https://u.y.qq.com/cgi-bin/musicu.fcg?${query.toString()}`,
+      url: 'https://u.y.qq.com/cgi-bin/musicu.fcg',
       body: JSON.stringify(payload),
       headers: {
         'Content-Type': 'application/json;charset=UTF-8',
@@ -516,38 +552,18 @@ export default class TencentProvider extends BaseProvider {
         'Referer': 'https://y.qq.com/'
       }
     };
-    
+
     const response = JSON.parse(await this.meting._exec(api));
-    const vkeys = response.req_1 && response.req_1.data ? response.req_1.data.midurlinfo || [] : [];
-    const sip = response.req_1 && response.req_1.data && response.req_1.data.sip ? response.req_1.data.sip[0] : '';
-    
-    let url = null;
-    for (let i = 0; i < candidates.length; i++) {
-      const vkey = vkeys[i] || {};
-      if (vkey.purl) {
-        const purl = vkey.purl || '';
-        url = {
-          url: /^https?:\/\//i.test(purl) ? purl : `${sip}${purl}`,
-          size: candidates[i].size,
-          br: candidates[i].br
-        };
-        break;
-      }
-    }
-    
-    if (!url) {
-      url = {
-        url: '',
-        size: 0,
-        br: -1,
-        code: response.req_1 ? response.req_1.code : response.code,
-        message: response.req_1 && response.req_1.msg
-          ? response.req_1.msg
-          : 'QQ Music did not return a playable URL for this track'
-      };
-    }
-    
-    return JSON.stringify(url);
+    const requestResult = response.req_0 || response.req_1 || {};
+    const data = requestResult.data || {};
+    const sipList = Array.isArray(data.sip) ? data.sip : [];
+    const sip = sipList.find(item => /^https:\/\//i.test(item)) || sipList[0] || '';
+
+    return {
+      response,
+      vkeys: Array.isArray(data.midurlinfo) ? data.midurlinfo : [],
+      sip
+    };
   }
 
   /**
