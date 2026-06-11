@@ -164,6 +164,12 @@ export default class TencentProvider extends BaseProvider {
     let cookies = this._cookiePairs(this._getSetCookie(response));
 
     if (redirectUrl) {
+      const musicLoginCookies = await this._fetchQQMusicLoginCookies(
+        redirectUrl,
+        [`qrsig=${qrsig}`, ...cookies]
+      );
+      cookies = cookies.concat(musicLoginCookies);
+
       const redirectCookies = await this._followCookieRedirects(
         redirectUrl,
         [`qrsig=${qrsig}`, ...cookies],
@@ -634,6 +640,133 @@ export default class TencentProvider extends BaseProvider {
     }
   }
 
+  async _fetchQQMusicLoginCookies(redirectUrl, cookies) {
+    try {
+      const auth = await this._authorizeQQMusicLogin(redirectUrl, cookies);
+      if (!auth.code) {
+        return auth.cookies;
+      }
+
+      const credential = await this._fetchQQMusicCredential(auth.code, auth.gtk, auth.cookies);
+      return this._dedupeCookiePairs([...auth.cookies, ...credential.cookies]);
+    } catch (error) {
+      return [];
+    }
+  }
+
+  async _authorizeQQMusicLogin(redirectUrl, cookies) {
+    const loginResponse = await fetch(redirectUrl, {
+      redirect: 'manual',
+      headers: {
+        'Cookie': this._dedupeCookiePairs(cookies).join('; '),
+        'Referer': 'https://xui.ptlogin2.qq.com/',
+        'User-Agent': this.getHeaders()['User-Agent'],
+        'Accept': '*/*'
+      }
+    });
+
+    const loginCookies = this._cookiePairs(this._getSetCookie(loginResponse));
+    const cookieJar = this._dedupeCookiePairs([...cookies, ...loginCookies]);
+    const pSkey = this._getCookieValueFromPairs(cookieJar, 'p_skey');
+    const gtk = pSkey ? this._hash33WithSeed(pSkey, 5381) : 5381;
+    const form = new URLSearchParams({
+      response_type: 'code',
+      client_id: QQ_LOGIN_3RD_AID,
+      redirect_uri: 'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/',
+      scope: 'get_user_info,get_app_friends',
+      state: 'state',
+      switch: '',
+      from_ptlogin: '1',
+      src: '1',
+      update_auth: '1',
+      openapi: '1010_1030',
+      g_tk: String(gtk),
+      auth_time: String(Date.now()),
+      ui: this._randomId()
+    });
+
+    const authorizeResponse = await fetch('https://graph.qq.com/oauth2.0/authorize', {
+      method: 'POST',
+      redirect: 'manual',
+      headers: {
+        'Cookie': cookieJar.join('; '),
+        'Referer': 'https://xui.ptlogin2.qq.com/',
+        'User-Agent': this.getHeaders()['User-Agent'],
+        'Accept': '*/*',
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: form.toString()
+    });
+
+    const authorizeCookies = this._cookiePairs(this._getSetCookie(authorizeResponse));
+    const location = authorizeResponse.headers.get('location') || '';
+    let code = '';
+
+    if (location) {
+      try {
+        code = new URL(location, 'https://y.qq.com/').searchParams.get('code') || '';
+      } catch {
+        code = '';
+      }
+    }
+
+    return {
+      code,
+      gtk,
+      cookies: this._dedupeCookiePairs([...cookieJar, ...authorizeCookies, 'login_type=1'])
+    };
+  }
+
+  async _fetchQQMusicCredential(code, gtk, cookies) {
+    const payload = {
+      comm: {
+        g_tk: gtk || 5381,
+        platform: 'yqq',
+        ct: 24,
+        cv: 0
+      },
+      req: {
+        module: 'QQConnectLogin.LoginServer',
+        method: 'QQLogin',
+        param: { code }
+      }
+    };
+
+    const response = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+      method: 'POST',
+      headers: {
+        'Cookie': this._dedupeCookiePairs(cookies).join('; '),
+        'Content-Type': 'application/json;charset=UTF-8',
+        'Accept': 'application/json, text/plain, */*',
+        'Origin': 'https://y.qq.com',
+        'Referer': 'https://y.qq.com/',
+        'User-Agent': this.getHeaders()['User-Agent']
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const responseCookies = this._cookiePairs(this._getSetCookie(response));
+    const data = this._parseJsonPayload(await response.text());
+    const result = data.req || data.req_1 || {};
+    const credential = result.data || {};
+    const musicId = credential.musicid || credential.str_musicid || '';
+    const musicKey = credential.musickey || credential.qqmusic_key || credential.qm_keyst || '';
+    const cookiesToStore = [...responseCookies];
+
+    if (musicId) {
+      cookiesToStore.push(`uin=${musicId}`, `qqmusic_uin=${musicId}`, `musicid=${musicId}`);
+    }
+
+    if (musicKey) {
+      cookiesToStore.push(`qqmusic_key=${musicKey}`, `qm_keyst=${musicKey}`, `musickey=${musicKey}`);
+    }
+
+    return {
+      cookies: this._dedupeCookiePairs(cookiesToStore),
+      data
+    };
+  }
+
   async _followCookieRedirects(url, cookies, referer = 'https://y.qq.com/', maxRedirects = 5) {
     const collected = [];
     let currentUrl = url;
@@ -669,6 +802,8 @@ export default class TencentProvider extends BaseProvider {
 
   _getLoginUin() {
     const cookieUin =
+      this._getCookieHeaderValue('qqmusic_uin') ||
+      this._getCookieHeaderValue('musicid') ||
       this._getCookieHeaderValue('uin') ||
       this._getCookieHeaderValue('p_uin') ||
       this._getCookieHeaderValue('pt2gguin') ||
@@ -695,6 +830,8 @@ export default class TencentProvider extends BaseProvider {
     return this._getCookieHeaderValue('qqmusic_key') ||
       this._getCookieHeaderValue('qm_keyst') ||
       this._getCookieHeaderValue('musickey') ||
+      this._getCookieHeaderValue('music_key') ||
+      this._getCookieHeaderValue('psrf_musickey') ||
       '';
   }
 
@@ -798,6 +935,29 @@ export default class TencentProvider extends BaseProvider {
       .find(cookie => cookie.startsWith(`${name}=`));
 
     return pair ? pair.slice(name.length + 1) : '';
+  }
+
+  _getCookieValueFromPairs(cookies, name) {
+    const pair = this._dedupeCookiePairs(cookies)
+      .find(cookie => cookie.startsWith(`${name}=`));
+
+    return pair ? pair.slice(name.length + 1) : '';
+  }
+
+  _hash33WithSeed(value, seed = 5381) {
+    let hash = seed;
+    for (let i = 0; i < value.length; i++) {
+      hash += (hash << 5) + value.charCodeAt(i);
+    }
+    return hash & 0x7fffffff;
+  }
+
+  _randomId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+      return globalThis.crypto.randomUUID();
+    }
+
+    return `${Date.now()}-${Math.floor(Math.random() * 1000000000)}`;
   }
 
   _cookiePairs(setCookie) {
