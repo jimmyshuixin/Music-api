@@ -6,6 +6,7 @@ const QQ_LOGIN_3RD_AID = '100497308';
 const QQ_LOGIN_U1 = 'https://graph.qq.com/oauth2.0/login_jump';
 const QQ_LOGIN_JS_VER = '23111510';
 const QQ_LOGIN_PT_JS_VER = 'v1.48.1';
+const QQ_LOGIN_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
 
 /**
  * 腾讯音乐平台提供者
@@ -39,7 +40,7 @@ export default class TencentProvider extends BaseProvider {
       s: '3',
       d: '72',
       v: '4',
-      t: String(Math.random()),
+      t: this._randomUnit(),
       daid: QQ_LOGIN_DAID,
       pt_3rd_aid: QQ_LOGIN_3RD_AID,
       u1: QQ_LOGIN_U1
@@ -48,7 +49,7 @@ export default class TencentProvider extends BaseProvider {
     const response = await fetch(url, {
       headers: {
         'Referer': 'https://y.qq.com/',
-        'User-Agent': this.getHeaders()['User-Agent'],
+        'User-Agent': QQ_LOGIN_USER_AGENT,
         'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
       }
     });
@@ -114,7 +115,7 @@ export default class TencentProvider extends BaseProvider {
     const url = 'https://ssl.ptlogin2.qq.com/ptqrlogin?' + new URLSearchParams({
       u1: QQ_LOGIN_U1,
       ptqrtoken: String(ptqrtoken),
-      ptredirect: '0',
+      ptredirect: '100',
       h: '1',
       t: '1',
       g: '1',
@@ -128,7 +129,11 @@ export default class TencentProvider extends BaseProvider {
       aid: QQ_LOGIN_APPID,
       daid: QQ_LOGIN_DAID,
       pt_3rd_aid: QQ_LOGIN_3RD_AID,
-      pt_js_version: QQ_LOGIN_PT_JS_VER
+      pt_js_version: QQ_LOGIN_PT_JS_VER,
+      has_onekey: '1',
+      pttype: '1',
+      service: 'ptqrlogin',
+      nodirect: '0'
     }).toString();
 
     const response = await fetch(url, {
@@ -136,7 +141,7 @@ export default class TencentProvider extends BaseProvider {
       headers: {
         'Cookie': `qrsig=${qrsig}`,
         'Referer': 'https://xui.ptlogin2.qq.com/',
-        'User-Agent': this.getHeaders()['User-Agent'],
+        'User-Agent': QQ_LOGIN_USER_AGENT,
         'Accept': '*/*'
       }
     });
@@ -181,11 +186,16 @@ export default class TencentProvider extends BaseProvider {
       cookies = cookies.concat(musicCookies);
     }
 
-    const cookie = this._dedupeCookiePairs(cookies).join('; ');
+    const cookie = this._normalizeQQMusicCookiePairs(cookies).join('; ');
     if (cookie) {
       result.cookie = cookie;
       result.cookieHeader = this._mergeCookieHeaders(this.meting.header.Cookie, cookie);
       this.meting.cookie(result.cookieHeader);
+      result.credential = {
+        uin: this._getLoginUin() !== '0',
+        musicKey: Boolean(this._getMusicKey()),
+        skey: Boolean(this._getGtk())
+      };
     }
 
     return JSON.stringify(result);
@@ -433,23 +443,27 @@ export default class TencentProvider extends BaseProvider {
     const musicKey = this._getMusicKey();
     const candidates = [];
     const mediaMid = song.file.media_mid || song.mid;
+    const songType = Number(song.type) || 0;
 
     qualityMap.forEach(([sizeKey, br, prefix, ext]) => {
       if (!song.file[sizeKey] || br > this.meting.temp.br) {
         return;
       }
 
-      const filename = `${prefix}${song.mid}${mediaMid}.${ext}`;
+      const filename = `${prefix}${mediaMid}.${ext}`;
       const fallbackFilenames = Array.from(new Set([
-        `${prefix}${mediaMid}.${ext}`,
+        `${prefix}${song.mid}${mediaMid}.${ext}`,
         `${prefix}${song.mid}${song.mid}.${ext}`,
         `${prefix}${song.mid}.${ext}`
       ])).filter(item => item !== filename);
 
       candidates.push({
+        prefix,
+        ext,
         filename,
         fallbackFilenames,
         songmid: song.mid,
+        songtype: songType,
         size: song.file[sizeKey],
         br
       });
@@ -468,17 +482,49 @@ export default class TencentProvider extends BaseProvider {
     const fallbackCandidates = candidates.flatMap(candidate =>
       candidate.fallbackFilenames.map(filename => ({ ...candidate, filename }))
     );
-    const attemptGroups = [candidates, candidates];
-    if (fallbackCandidates.length) {
-      attemptGroups.push(fallbackCandidates);
-    }
+    const modernCandidates = candidates.map(candidate => ({
+      ...candidate,
+      filename: `${candidate.prefix}${candidate.songmid}${candidate.songmid}.${candidate.ext}`
+    }));
+    const attempts = [
+      { strategy: 'modern-post', candidates: modernCandidates },
+      { strategy: 'meting-get', candidates },
+      { strategy: 'web-post', candidates },
+      ...(fallbackCandidates.length
+        ? [
+            { strategy: 'web-post', candidates: fallbackCandidates },
+            { strategy: 'mobile-post', candidates: fallbackCandidates }
+          ]
+        : [])
+    ];
 
     let url = null;
     let lastResponse = null;
+    let lastStrategy = '';
+    const diagnostics = [];
 
-    for (const group of attemptGroups) {
-      const result = await this._requestVkeys(group, requestOptions);
+    for (const attempt of attempts) {
+      const group = attempt.candidates;
+      const result = await this._requestVkeys(group, requestOptions, attempt.strategy);
       lastResponse = result.response;
+      lastStrategy = attempt.strategy;
+      const requestResult = result.response &&
+        (result.response.req_0 || result.response.req_1 || result.response.req || {});
+      diagnostics.push({
+        strategy: attempt.strategy,
+        topCode: result.response && result.response.code,
+        code: requestResult && requestResult.code,
+        message: (requestResult && (requestResult.message || requestResult.msg)) || '',
+        vkeyCount: result.vkeys.length,
+        purlCount: result.vkeys.filter(item => Boolean(item && item.purl)).length,
+        items: result.vkeys.slice(0, 8).map(item => ({
+          filename: item && item.filename || '',
+          hasPurl: Boolean(item && item.purl),
+          hasVkey: Boolean(item && item.vkey),
+          result: item && item.result,
+          message: item && (item.message || item.msg) || ''
+        }))
+      });
 
       for (let i = 0; i < group.length; i++) {
         const purl = result.vkeys[i] && result.vkeys[i].purl;
@@ -504,6 +550,8 @@ export default class TencentProvider extends BaseProvider {
         size: 0,
         br: -1,
         code: requestResult ? requestResult.code : (lastResponse && lastResponse.code),
+        strategy: lastStrategy,
+        diagnostics,
         message: requestResult && requestResult.msg
           ? requestResult.msg
           : 'QQ Music did not return a playable URL for this track'
@@ -513,51 +561,96 @@ export default class TencentProvider extends BaseProvider {
     return JSON.stringify(url);
   }
 
-  async _requestVkeys(candidates, option) {
+  async _requestVkeys(candidates, option, strategy) {
+    const modern = strategy === 'modern-post';
+    const requestKey = modern || strategy === 'web-post' ? 'req_1' : 'req_0';
+    const chinaIp = this._randomChinaIp();
     const payload = {
-      req_0: {
-        module: 'vkey.GetVkeyServer',
-        method: 'CgiGetVkey',
+      [requestKey]: {
+        module: modern ? 'music.vkey.GetVkey' : 'vkey.GetVkeyServer',
+        method: modern ? 'UrlGetVkey' : 'CgiGetVkey',
         param: {
           filename: candidates.map(candidate => candidate.filename),
           guid: String(option.guid),
           songmid: candidates.map(candidate => candidate.songmid),
-          songtype: candidates.map(() => 0),
-          uin: option.uin,
+          songtype: candidates.map(candidate => modern ? 0 : candidate.songtype),
+          uin: modern ? '0' : option.uin,
           loginflag: 1,
           platform: '20'
         }
-      },
-      comm: {
-        uin: option.uin,
-        format: 'json',
-        ct: 19,
-        cv: 0,
-        g_tk: option.gtk
       }
     };
 
-    if (option.musicKey) {
-      payload.comm.authst = option.musicKey;
+    let api;
+    if (strategy === 'meting-get') {
+      api = {
+        method: 'GET',
+        url: 'https://u.y.qq.com/cgi-bin/musicu.fcg',
+        body: {
+          format: 'json',
+          platform: 'yqq.json',
+          needNewCode: 0,
+          loginUin: option.uin,
+          g_tk: option.gtk,
+          data: JSON.stringify(payload)
+        },
+        headers: {
+          'X-Forwarded-For': chinaIp,
+          'X-Real-IP': chinaIp
+        }
+      };
+    } else {
+      payload.comm = modern
+        ? {
+            cv: 4747474,
+            ct: 24,
+            format: 'json',
+            inCharset: 'utf-8',
+            outCharset: 'utf-8',
+            notice: 0,
+            platform: 'yqq.json',
+            needNewCode: 1,
+            uin: 0
+          }
+        : {
+            uin: option.uin,
+            format: 'json',
+            ct: strategy === 'mobile-post' ? 19 : 24,
+            cv: 0,
+            g_tk: option.gtk
+          };
+
+      if (!modern && option.musicKey) {
+        payload.comm.authst = option.musicKey;
+      }
+
+      api = {
+        method: 'POST',
+        url: 'https://u.y.qq.com/cgi-bin/musicu.fcg',
+        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'application/json;charset=UTF-8',
+          'Accept': 'application/json, text/plain, */*',
+          'Origin': 'https://y.qq.com',
+          'Referer': modern ? 'http://y.qq.com' : 'https://y.qq.com/',
+          'X-Forwarded-For': chinaIp,
+          'X-Real-IP': chinaIp,
+          ...(modern ? { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 9_1 like Mac OS X) AppleWebKit/601.1.46' } : {})
+        }
+      };
     }
 
-    const api = {
-      method: 'POST',
-      url: 'https://u.y.qq.com/cgi-bin/musicu.fcg',
-      body: JSON.stringify(payload),
-      headers: {
-        'Content-Type': 'application/json;charset=UTF-8',
-        'Accept': 'application/json, text/plain, */*',
-        'Origin': 'https://y.qq.com',
-        'Referer': 'https://y.qq.com/'
-      }
-    };
-
-    const response = JSON.parse(await this.meting._exec(api));
-    const requestResult = response.req_0 || response.req_1 || {};
+    let response;
+    try {
+      response = JSON.parse(await this.meting._exec(api));
+    } catch (error) {
+      response = { code: -1, message: error.message || 'Invalid QQ Music response' };
+    }
+    const requestResult = response[requestKey] || response.req_0 || response.req_1 || response.req || {};
     const data = requestResult.data || {};
     const sipList = Array.isArray(data.sip) ? data.sip : [];
-    const sip = sipList.find(item => /^https:\/\//i.test(item)) || sipList[0] || '';
+    const sip = sipList.find(item => /^https:\/\//i.test(item)) || sipList[0] ||
+      (modern ? 'https://ws.stream.qqmusic.qq.com/' : '');
 
     return {
       response,
@@ -676,7 +769,7 @@ export default class TencentProvider extends BaseProvider {
       headers: {
         'Cookie': this._dedupeCookiePairs(cookies).join('; '),
         'Referer': 'https://xui.ptlogin2.qq.com/',
-        'User-Agent': this.getHeaders()['User-Agent'],
+        'User-Agent': QQ_LOGIN_USER_AGENT,
         'Accept': '*/*'
       }
     });
@@ -707,7 +800,7 @@ export default class TencentProvider extends BaseProvider {
       headers: {
         'Cookie': cookieJar.join('; '),
         'Referer': 'https://xui.ptlogin2.qq.com/',
-        'User-Agent': this.getHeaders()['User-Agent'],
+        'User-Agent': QQ_LOGIN_USER_AGENT,
         'Accept': '*/*',
         'Content-Type': 'application/x-www-form-urlencoded'
       },
@@ -756,7 +849,7 @@ export default class TencentProvider extends BaseProvider {
         'Accept': 'application/json, text/plain, */*',
         'Origin': 'https://y.qq.com',
         'Referer': 'https://y.qq.com/',
-        'User-Agent': this.getHeaders()['User-Agent']
+        'User-Agent': QQ_LOGIN_USER_AGENT
       },
       body: JSON.stringify(payload)
     });
@@ -795,7 +888,7 @@ export default class TencentProvider extends BaseProvider {
         headers: {
           'Cookie': cookieJar.join('; '),
           'Referer': currentReferer,
-          'User-Agent': this.getHeaders()['User-Agent'],
+          'User-Agent': QQ_LOGIN_USER_AGENT,
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
         }
       });
@@ -821,6 +914,9 @@ export default class TencentProvider extends BaseProvider {
       this._getCookieHeaderValue('qqmusic_uin') ||
       this._getCookieHeaderValue('musicid') ||
       this._getCookieHeaderValue('uin') ||
+      this._getCookieHeaderValue('ptui_loginuin') ||
+      this._getCookieHeaderValue('luin') ||
+      this._getCookieHeaderValue('superuin') ||
       this._getCookieHeaderValue('p_uin') ||
       this._getCookieHeaderValue('pt2gguin') ||
       '';
@@ -848,15 +944,17 @@ export default class TencentProvider extends BaseProvider {
       this._getCookieHeaderValue('musickey') ||
       this._getCookieHeaderValue('music_key') ||
       this._getCookieHeaderValue('psrf_musickey') ||
+      this._getCookieHeaderValue('p_skey') ||
+      this._getCookieHeaderValue('skey') ||
       '';
   }
 
   _getGuid() {
     const guid = this._getCookieHeaderValue('pgv_pvid') ||
       this._getCookieHeaderValue('pgv_pvi') ||
-      String(Math.floor(Math.random() * 10000000000));
+      this._randomDecimal(10);
 
-    return String(guid).replace(/\D/g, '') || String(Math.floor(Math.random() * 10000000000));
+    return String(guid).replace(/\D/g, '') || this._randomDecimal(10);
   }
 
   _parseJsonPayload(result) {
@@ -960,6 +1058,38 @@ export default class TencentProvider extends BaseProvider {
     return pair ? pair.slice(name.length + 1) : '';
   }
 
+  _normalizeQQMusicCookiePairs(cookies) {
+    const normalized = this._dedupeCookiePairs(cookies);
+    const uin = this._getCookieValueFromPairs(normalized, 'qqmusic_uin') ||
+      this._getCookieValueFromPairs(normalized, 'musicid') ||
+      this._getCookieValueFromPairs(normalized, 'uin') ||
+      this._getCookieValueFromPairs(normalized, 'ptui_loginuin') ||
+      this._getCookieValueFromPairs(normalized, 'luin') ||
+      this._getCookieValueFromPairs(normalized, 'superuin') ||
+      this._getCookieValueFromPairs(normalized, 'p_uin') ||
+      this._getCookieValueFromPairs(normalized, 'pt2gguin') ||
+      '';
+    const musicKey = this._getCookieValueFromPairs(normalized, 'qqmusic_key') ||
+      this._getCookieValueFromPairs(normalized, 'qm_keyst') ||
+      this._getCookieValueFromPairs(normalized, 'musickey') ||
+      this._getCookieValueFromPairs(normalized, 'music_key') ||
+      this._getCookieValueFromPairs(normalized, 'psrf_musickey') ||
+      this._getCookieValueFromPairs(normalized, 'p_skey') ||
+      this._getCookieValueFromPairs(normalized, 'skey') ||
+      '';
+    const aliases = [];
+    const normalizedUin = String(uin).replace(/^o/, '').replace(/\D/g, '');
+
+    if (normalizedUin) {
+      aliases.push(`uin=${normalizedUin}`, `qqmusic_uin=${normalizedUin}`, `musicid=${normalizedUin}`);
+    }
+    if (musicKey) {
+      aliases.push(`qqmusic_key=${musicKey}`, `qm_keyst=${musicKey}`, `musickey=${musicKey}`);
+    }
+
+    return this._dedupeCookiePairs([...normalized, ...aliases]);
+  }
+
   _hash33WithSeed(value, seed = 5381) {
     let hash = seed;
     for (let i = 0; i < value.length; i++) {
@@ -973,7 +1103,43 @@ export default class TencentProvider extends BaseProvider {
       return globalThis.crypto.randomUUID();
     }
 
-    return `${Date.now()}-${Math.floor(Math.random() * 1000000000)}`;
+    return `${Date.now()}-${this._randomDecimal(9)}`;
+  }
+
+  _randomUnit() {
+    return `0.${this._randomDecimal(16)}`;
+  }
+
+  _randomDecimal(length) {
+    const size = Math.max(1, Number(length) || 1);
+    const bytes = new Uint8Array(size);
+
+    if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+      globalThis.crypto.getRandomValues(bytes);
+    } else {
+      for (let index = 0; index < bytes.length; index++) {
+        bytes[index] = (Date.now() >> (index % 8)) & 255;
+      }
+    }
+
+    return Array.from(bytes, value => String(value % 10)).join('');
+  }
+
+  _randomChinaIp() {
+    const prefixes = [
+      [116, 255], [116, 228], [218, 192], [124, 0], [14, 132],
+      [183, 14], [58, 14], [113, 116], [120, 230]
+    ];
+    const random = new Uint8Array(3);
+    if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+      globalThis.crypto.getRandomValues(random);
+    } else {
+      random[0] = Date.now() & 255;
+      random[1] = Date.now() >> 8 & 255;
+      random[2] = Date.now() >> 16 & 255;
+    }
+    const prefix = prefixes[random[0] % prefixes.length];
+    return `${prefix[0]}.${prefix[1]}.${random[1] % 254 + 1}.${random[2] % 254 + 1}`;
   }
 
   _cookiePairs(setCookie) {
